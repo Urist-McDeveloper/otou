@@ -135,7 +135,7 @@ pub const SecureSocket = struct {
         const msg_nonce = self.recv_buf[0..24];
         const msg_tag = self.recv_buf[24..40];
 
-        var derived = undefined;
+        var derived: [64]u8 = undefined;
         Blake3.hash(msg_nonce, &derived, .{ .key = self.key });
 
         const msg_key = derived[0..16];
@@ -155,7 +155,7 @@ pub const SecureSocket = struct {
         const msg_nonce = self.send_buf[0..24];
         self.rng.fill(msg_nonce);
 
-        var derived = undefined;
+        var derived: [64]u8 = undefined;
         Blake3.hash(msg_nonce, &derived, .{ .key = self.key });
 
         const msg_key = derived[0..16];
@@ -189,7 +189,6 @@ pub const Worker = struct {
 
     peer_addr_fixed: ?net.Address,
     peer_addr_dyn: ?net.Address,
-    peer_addr_mutex: Mutex,
 
     pub fn run(tun: Tun, key: [32]u8, bind_addr: ?net.Address, peer_addr: ?net.Address) !void {
         assert(bind_addr != null or peer_addr != null);
@@ -199,7 +198,6 @@ pub const Worker = struct {
             .tun = tun,
             .peer_addr_fixed = peer_addr,
             .peer_addr_dyn = null,
-            .peer_addr_mutex = .{},
         };
         defer ctx.deinit();
 
@@ -218,15 +216,9 @@ pub const Worker = struct {
     fn hostToPeerLoop(ctx: *Worker) !void {
         while (true) {
             const recv = try ctx.tun.recv(ctx.sock.getDataSlice());
-            const addr = ctx.peer_addr_fixed orelse blk: {
-                ctx.peer_addr_mutex.lock();
-                const dyn = ctx.peer_addr_dyn;
-                ctx.peer_addr_mutex.unlock();
-
-                break :blk dyn orelse {
-                    log.warn("peer_send: peer address unknown", .{});
-                    continue;
-                };
+            const addr = ctx.peer_addr_fixed orelse ctx.peer_addr_dyn orelse {
+                log.warn("peer_send: peer address unknown", .{});
+                continue;
             };
 
             ctx.sock.send(addr, recv.len) catch |e| switch (e) {
@@ -244,11 +236,7 @@ pub const Worker = struct {
                 log.warn("peer_recv: forged packet from {}", .{recv.from});
                 continue;
             };
-
-            ctx.peer_addr_mutex.lock();
             ctx.peer_addr_dyn = recv.from;
-            ctx.peer_addr_mutex.unlock();
-
             try ctx.tun.send(data);
         }
     }
@@ -291,6 +279,7 @@ const LinuxTun = struct {
         switch (posix.errno(linux.ioctl(fd, TUNSETIFF, @intFromPtr(&ifr)))) {
             .SUCCESS => {},
             .PERM => return error.AccessDenied,
+            .BUSY => return error.AlreadyInUse,
             else => |err| {
                 log.err("failed to open {s}: {s}", .{ name, @tagName(err) });
                 return posix.unexpectedErrno(err);
@@ -300,7 +289,6 @@ const LinuxTun = struct {
         const sock_fd = try posix.socket(posix.AF.INET, posix.SOCK.DGRAM, 0);
         defer posix.close(sock_fd);
 
-        // ifr.ifru = std.mem.zeroes(@TypeOf(ifr.ifru));
         switch(posix.errno(linux.ioctl(sock_fd, SIOCGIFMTU, @intFromPtr(&ifr)))) {
             .SUCCESS => {},
             .PERM => return error.AccessDenied,
