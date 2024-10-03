@@ -42,7 +42,7 @@ pub fn build(b: *std.Build) void {
 
     const bench_cmd = b.addRunArtifact(bench);
     if (b.args) |args| {
-        run_cmd.addArgs(args);
+        bench_cmd.addArgs(args);
     }
 
     const bench_step = b.step("bench", "Run benchmarks");

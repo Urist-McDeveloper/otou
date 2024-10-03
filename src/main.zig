@@ -1,5 +1,6 @@
 const std = @import("std");
 const builtin = @import("builtin");
+const config = @import("config.zig");
 
 const net = std.net;
 const posix = std.posix;
@@ -7,67 +8,44 @@ const posix = std.posix;
 const assert = std.debug.assert;
 const log = std.log;
 
-const test_key_str = "bfeab420066cafde41f8d7c7e5b4854454ac21a64e83ca14d731f1107e8fa362";
-const test_key = std.mem.toBytes(std.fmt.parseInt(u256, test_key_str, 16) catch unreachable);
-
-pub const Args = struct {
-    bind: ?net.Address = null,
-    peer: ?net.Address = null,
-
-    pub fn printUsageAndExit() noreturn {
-        stderr("Usage: otou [--bind IP] [--peer IP]\n", .{});
-        stderr("At least one option must be set.\n", .{});
-        std.process.exit(1);
-    }
-
-    pub fn parse(raw: []const [:0]const u8) Args {
-        var parsed = Args{};
-        var i: usize = 1;
-
-        while (i < raw.len) : (i += 1) {
-            const this_arg = raw[i];
-            const next_arg = if (i + 1 == raw.len) null else raw[i + 1];
-
-            if (std.mem.eql(u8, "--bind", this_arg)) {
-                parsed.bind = parseAddr(next_arg orelse printUsageAndExit());
-            }
-            if (std.mem.eql(u8, "--peer", this_arg)) {
-                parsed.peer = parseAddr(next_arg orelse printUsageAndExit());
-            }
-        }
-
-        if (parsed.bind == null and parsed.peer == null) {
-            printUsageAndExit();
-        } else {
-            return parsed;
-        }
-    }
-
-    fn parseAddr(raw: []const u8) net.Address {
-        return net.Address.parseIp(raw, 1037) catch {
-            stderr("malformed address: {s}\n\n", .{raw});
-            printUsageAndExit();
-        };
-    }
-
-    fn stderr(comptime fmt: []const u8, args: anytype) void {
-        std.io.getStdErr().writer().print(fmt, args) catch {};
-    }
-};
-
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
     const a = gpa.allocator();
 
-    const raw_args = try std.process.argsAlloc(a);
-    const args = Args.parse(raw_args);
-    std.process.argsFree(a, raw_args);
+    const args = try config.Args.init(a);
+    defer args.deinit(a);
 
-    var tun = try Tun.open("tun-otou");
-    defer tun.close();
+    switch (args.command) {
+        .genkey => {
+            var key: [32]u8 = undefined;
+            try posix.getrandom(&key);
+            try std.io.getStdOut().writer().print("{x:0>64}\n", .{std.mem.readInt(u256, &key, .little)});
+        },
+        .run => {
+            const parsed = try config.Full.parse(a, args.config_path);
+            defer parsed.deinit();
 
-    try Worker.run(tun, test_key, args.bind, args.peer);
+            var tun = try Tun.open("tun-otou");
+            defer tun.close();
+
+            try Worker.run(tun, parsed.value);
+        },
+        else => {
+            const parsed = try config.IpcOnly.parse(a, args.config_path);
+            defer parsed.deinit();
+
+            try runIpc(a, args.command, parsed.value.ipc);
+        },
+    }
+}
+
+pub fn runIpc(a: std.mem.Allocator, command: config.Command, ipc: config.Ipc) !void {
+    _ = a;
+    _ = command;
+    _ = ipc;
+
+    return error.NotImplemented;
 }
 
 pub const SecureSocket = struct {
@@ -75,28 +53,24 @@ pub const SecureSocket = struct {
     const Blake3 = std.crypto.hash.Blake3;
     const Aegis128L = std.crypto.aead.aegis.Aegis128L;
 
-    const max_msg_size = 1460; // to fit in 1500 MTU
-    const header_size = 40; // 24 byte nonce, 16 byte tag
-    const max_data_len = max_msg_size - header_size;
+    pub const max_msg_size = 1460; // to fit in 1500 MTU with 40 bytes of IPv4 packet overhead
+    pub const header_size = 40; // 24 byte nonce, 16 byte tag
+    pub const max_data_len = max_msg_size - header_size;
 
     sock: posix.socket_t,
     recv_buf: [max_msg_size]u8 = undefined,
     send_buf: [max_msg_size]u8 = undefined,
 
-    bytes_tx: usize = 0,
-    bytes_rx: usize = 0,
-
     key: [32]u8,
     rng: std.Random.ChaCha,
 
-    pub const AuthError = error{Forged};
     pub const InitError = posix.SocketError || posix.BindError || posix.GetRandomError;
-    pub const RecvError = posix.RecvFromError;
+    pub const RecvError = error{ Garbage, Forged } || posix.RecvFromError;
     pub const SendError = posix.SendToError;
 
     pub const RecvData = struct {
         from: net.Address,
-        data: AuthError![]u8,
+        data: []u8,
     };
 
     pub fn init(key: [32]u8, bind: ?net.Address) InitError!Self {
@@ -129,8 +103,7 @@ pub const SecureSocket = struct {
         const msg_size = try posix.recvfrom(self.sock, &self.recv_buf, 0, &from_raw, &from_len);
         const addr = net.Address.initPosix(&from_raw);
 
-        const forged = RecvData{ .from = addr, .data = AuthError.Forged };
-        if (header_size > msg_size) return forged;
+        if (msg_size < header_size) return error.Garbage;
 
         const msg_nonce = self.recv_buf[0..24];
         const msg_tag = self.recv_buf[24..40];
@@ -143,9 +116,8 @@ pub const SecureSocket = struct {
         const msg_ad = derived[32..64];
 
         const msg_data = self.recv_buf[header_size..msg_size];
-        Aegis128L.decrypt(msg_data, msg_data, msg_tag.*, msg_ad, msg_iv.*, msg_key.*) catch return forged;
+        Aegis128L.decrypt(msg_data, msg_data, msg_tag.*, msg_ad, msg_iv.*, msg_key.*) catch return error.Forged;
 
-        _ = @atomicRmw(usize, &self.bytes_rx, .Add, msg_size, .release);
         return RecvData{ .from = addr, .data = msg_data };
     }
 
@@ -153,6 +125,7 @@ pub const SecureSocket = struct {
         assert(data_len <= max_data_len);
 
         const msg_nonce = self.send_buf[0..24];
+        const msg_tag = self.send_buf[24..40];
         self.rng.fill(msg_nonce);
 
         var derived: [64]u8 = undefined;
@@ -162,14 +135,12 @@ pub const SecureSocket = struct {
         const msg_iv = derived[16..32];
         const msg_ad = derived[32..64];
 
-        const msg_tag = self.send_buf[24..40];
         const msg_data = self.send_buf[header_size..][0..data_len];
         Aegis128L.encrypt(msg_data, msg_tag, msg_data, msg_ad, msg_iv.*, msg_key.*);
 
         const msg_size = header_size + data_len;
         const sent = try posix.sendto(self.sock, self.send_buf[0..msg_size], 0, &addr.any, addr.getOsSockLen());
 
-        _ = @atomicRmw(usize, &self.bytes_tx, .Add, msg_size, .release);
         // sanity check, should never fail
         assert(sent == msg_size);
     }
@@ -190,13 +161,11 @@ pub const Worker = struct {
     peer_addr_fixed: ?net.Address,
     peer_addr_dyn: ?net.Address,
 
-    pub fn run(tun: Tun, key: [32]u8, bind_addr: ?net.Address, peer_addr: ?net.Address) !void {
-        assert(bind_addr != null or peer_addr != null);
-
+    pub fn run(tun: Tun, cfg: config.Full) !void {
         var ctx = Worker{
-            .sock = try SecureSocket.init(key, bind_addr),
+            .sock = try SecureSocket.init(try cfg.common.parseKey(), try cfg.common.parseBind()),
             .tun = tun,
-            .peer_addr_fixed = peer_addr,
+            .peer_addr_fixed = if (cfg.client) |c| try c.parseServerAddr() else null,
             .peer_addr_dyn = null,
         };
         defer ctx.deinit();
@@ -214,35 +183,43 @@ pub const Worker = struct {
     }
 
     fn hostToPeerLoop(ctx: *Worker) !void {
+        const scoped = log.scoped(.host_to_peer);
         while (true) {
             const recv = try ctx.tun.recv(ctx.sock.getDataSlice());
             const addr = ctx.peer_addr_fixed orelse ctx.peer_addr_dyn orelse {
-                log.warn("peer_send: peer address unknown", .{});
+                scoped.warn("peer address unknown", .{});
                 continue;
             };
 
             ctx.sock.send(addr, recv.len) catch |e| switch (e) {
-                posix.SendError.NetworkUnreachable => log.err("peer_send: network unreachable", .{}),
-                posix.SendToError.UnreachableAddress => log.err("peer_send: unreachable address ({})", .{addr}),
+                posix.SendError.NetworkUnreachable => scoped.err("network unreachable", .{}),
+                posix.SendToError.UnreachableAddress => scoped.err("unreachable address {}", .{addr}),
                 else => return e,
             };
         }
     }
 
     fn peerToHostLoop(ctx: *Worker) !void {
+        const scoped = log.scoped(.peer_to_host);
         while (true) {
-            const recv = try ctx.sock.recv();
-            const data = recv.data catch {
-                log.warn("peer_recv: forged packet from {}", .{recv.from});
-                continue;
+            const recv = ctx.sock.recv() catch |err| switch (err) {
+                error.Garbage => {
+                    scoped.debug("dropping malformed packet", .{});
+                    continue;
+                },
+                error.Forged => {
+                    scoped.debug("dropping forged packet", .{});
+                    continue;
+                },
+                else => return err,
             };
             ctx.peer_addr_dyn = recv.from;
-            try ctx.tun.send(data);
+            try ctx.tun.send(recv.data);
         }
     }
 };
 
-const tun_mtu = 1420;
+const tun_mtu = SecureSocket.max_data_len;
 const Tun = switch (builtin.os.tag) {
     .linux => LinuxTun,
     else => unreachable,
@@ -289,7 +266,7 @@ const LinuxTun = struct {
         const sock_fd = try posix.socket(posix.AF.INET, posix.SOCK.DGRAM, 0);
         defer posix.close(sock_fd);
 
-        switch(posix.errno(linux.ioctl(sock_fd, SIOCGIFMTU, @intFromPtr(&ifr)))) {
+        switch (posix.errno(linux.ioctl(sock_fd, SIOCGIFMTU, @intFromPtr(&ifr)))) {
             .SUCCESS => {},
             .PERM => return error.AccessDenied,
             else => |err| {
@@ -299,7 +276,7 @@ const LinuxTun = struct {
         }
 
         if (ifr.ifru.mtu != tun_mtu) {
-            log.info("old MTU = {}, setting to {}", .{ifr.ifru.mtu, tun_mtu});
+            log.info("old MTU = {}, setting to {}", .{ ifr.ifru.mtu, tun_mtu });
             ifr.ifru = .{ .mtu = tun_mtu };
 
             switch (posix.errno(linux.ioctl(sock_fd, SIOCSIFMTU, @intFromPtr(&ifr)))) {
@@ -333,3 +310,8 @@ const LinuxTun = struct {
         assert(size == buf.len);
     }
 };
+
+test {
+    _ = @import("config.zig");
+    _ = @import("ip.zig");
+}

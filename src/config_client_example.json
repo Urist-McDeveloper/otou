@@ -1,0 +1,16 @@
+{
+  "ipc": {
+    "pid_file": "/run/otou.pid",
+    "sock_file": "/run/otou.sock"
+  },
+  "common": {
+    "tun_name": "tun_otou",
+    "tun_addr": "10.13.37.2/32",
+    "tun_keep": true,
+    "bind": "0.0.0.0:0",
+    "key": "0000000000000000000000000000000000000000000000000000000000000000"
+  },
+  "client": {
+    "server_addr": "1.2.3.4:1037"
+  }
+}
