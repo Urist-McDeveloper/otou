@@ -8,6 +8,7 @@ const Tun = @import("Tun.zig");
 
 const net = std.net;
 const posix = std.posix;
+const routes = @import("routes.zig");
 
 const assert = std.debug.assert;
 const log = std.log;
@@ -20,22 +21,28 @@ pub fn main() !void {
     const args = try Args.init(a);
     defer args.deinit(a);
 
-    switch (args.command) {
-        .genkey => {
-            var key: [32]u8 = undefined;
-            try posix.getrandom(&key);
-            try std.io.getStdOut().writer().print("{x:0>64}\n", .{std.mem.readInt(u256, &key, .little)});
-        },
-        .run => {
-            const parsed = try Config.parse(a, args.config_path);
-            defer parsed.deinit();
-            const common = parsed.value.common;
+    if (args.command == .genkey) {
+        var key: [32]u8 = undefined;
+        try posix.getrandom(&key);
+        try std.io.getStdOut().writer().print("{x:0>64}\n", .{std.mem.readInt(u256, &key, .little)});
+    } else {
+        const parsed = try Config.parse(a, args.config_path);
+        defer parsed.deinit();
+        const cfg = parsed.value;
 
-            var tun = try Tun.open(a, common.tun_name, common.tun_addr, common.tun_keep);
-            defer tun.close();
+        switch (args.command) {
+            .run => {
+                const tun_keep = if (cfg.client) |c| c.tun_keep else false;
 
-            try Worker.run(tun, parsed.value);
-        },
+                var tun = try Tun.open(a, cfg.tun_name, cfg.tun_addr, tun_keep);
+                defer tun.close();
+
+                try Worker.run(tun, cfg);
+            },
+            .routes_up => try routes.up(a, cfg),
+            .routes_down => try routes.down(a, cfg),
+            else => unreachable,
+        }
     }
 }
 
@@ -51,7 +58,7 @@ pub const Worker = struct {
 
     pub fn run(tun: Tun, cfg: Config) !void {
         var ctx = Worker{
-            .ch = try Channel.init(try cfg.common.parseKey(), try cfg.common.parseBind()),
+            .ch = try Channel.init(try cfg.parseKey(), try cfg.parseBind()),
             .tun = tun,
             .peer_addr_fixed = if (cfg.client) |c| try c.parseServerAddr() else null,
             .peer_addr_dyn = null,
@@ -113,5 +120,6 @@ test {
     _ = @import("cmd.zig");
     _ = @import("Config.zig");
     _ = @import("ip.zig");
+    _ = @import("routes.zig");
     _ = @import("Tun.zig");
 }

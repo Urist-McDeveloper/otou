@@ -10,14 +10,19 @@ const usage =
     \\  -h, --help          print this message and exit
     \\  -v, --version       print version and exit
     \\
-    \\Commands:
+    \\Common commands:
     \\  genkey              generate a random 32-byte secret key
     \\  run                 start main process
+    \\
+    \\Client mode commands:
+    \\  routes <up|down>    set/reset gateway routes
 ;
 
 pub const Command = enum {
     genkey,
     run,
+    routes_up,
+    routes_down,
 
     fn from(str: []const u8) ?Command {
         inline for (@typeInfo(Command).Enum.fields) |field| {
@@ -44,20 +49,28 @@ pub fn init(a: Allocator) !@This() {
     var config: ?[]const u8 = null;
     var command: ?Command = null;
 
-    var i: usize = 1;
-    while (i < raw.len) : (i += 1) {
-        const arg = raw[i];
-
+    var iter = ArgIter{ .raw = raw };
+    while (iter.next()) |arg| {
         if (isOpt(arg, "help")) printAndExit(0, usage, .{});
         if (isOpt(arg, "version")) printAndExit(0, version, .{});
+
         if (isOpt(arg, "config")) {
-            i += 1;
-            if (i < raw.len) {
-                config = raw[i];
+            config = iter.next() orelse printAndExit(1, "missing PATH parameter for {s}", .{arg});
+            continue;
+        }
+
+        if (is(arg, "routes")) {
+            const next = iter.next() orelse printAndExit(1, "missing <up|down> parameter for routes", .{});
+
+            if (is(next, "up")) {
+                command = .routes_up;
                 continue;
-            } else {
-                printAndExit(1, "missing PATH parameter for {s}", .{arg});
             }
+            if (is(next, "down")) {
+                command = .routes_down;
+                continue;
+            }
+            printAndExit(1, "unknown parameter for routes: {s}", .{next});
         }
 
         if (command == null) {
@@ -75,8 +88,28 @@ pub fn init(a: Allocator) !@This() {
     };
 }
 
+const ArgIter = struct {
+    raw: []const []const u8,
+    idx: usize = 1,
+
+    pub fn next(self: *ArgIter) ?[]const u8 {
+        if (self.idx < self.raw.len) {
+            const arg = self.raw[self.idx];
+            self.idx += 1;
+
+            return arg;
+        } else {
+            return null;
+        }
+    }
+};
+
 fn isOpt(arg: []const u8, comptime opt: []const u8) bool {
-    return std.mem.eql(u8, "--" ++ opt, arg) or std.mem.eql(u8, "-" ++ opt[0..1], arg);
+    return std.mem.eql(u8, arg, "--" ++ opt) or std.mem.eql(u8, arg, "-" ++ opt[0..1]);
+}
+
+fn is(arg: []const u8, comptime cmd: []const u8) bool {
+    return std.mem.eql(u8, cmd, arg);
 }
 
 inline fn printAndExit(code: u1, comptime fmt: []const u8, args: anytype) noreturn {

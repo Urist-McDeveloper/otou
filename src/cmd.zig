@@ -19,14 +19,12 @@ pub fn run(a: Allocator, cmd: []const []const u8) RunError![]const u8 {
         const merged = merge(a, cmd) catch null;
         defer if (merged) |m| a.free(m);
 
-        const stdout = result.stdout;
         var stderr = result.stderr;
-
         if (stderr.len > 0 and stderr[stderr.len - 1] == '\n') {
             stderr = stderr[0 .. stderr.len - 1];
         }
 
-        log.err("{?s}\n\tstdout:\n{s}\tstderr:\n{s}", .{ merged, stdout, stderr });
+        log.err("{?s}\n{s}", .{ merged, stderr });
         return error.CmdError;
     }
 }
@@ -54,7 +52,14 @@ fn merge(a: Allocator, cmd: []const []const u8) ![]const u8 {
     var merged = std.ArrayList(u8).init(a);
     for (cmd, 0..) |arg, i| {
         if (i != 0) try merged.append(' ');
-        try merged.appendSlice(arg);
+
+        const has_spaces = std.mem.indexOfScalar(u8, arg, ' ') != null;
+        if (has_spaces) try merged.append('"');
+        for (arg) |c| {
+            if (c == '"') try merged.append('\\');
+            try merged.append(c);
+        }
+        if (has_spaces) try merged.append('"');
     }
     return merged.toOwnedSlice();
 }

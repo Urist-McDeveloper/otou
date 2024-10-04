@@ -7,69 +7,8 @@ const log = std.log.scoped(.cfg);
 const Allocator = std.mem.Allocator;
 const Config = @This();
 
-ipc: Ipc,
-common: Common,
-client: ?Client = null,
-server: ?Server = null,
-
-pub fn parse(a: Allocator, path: ?[]const u8) !std.json.Parsed(Config) {
-    const path_ = path orelse switch (builtin.os.tag) {
-        .linux => "/etc/otou.json",
-        else => unreachable,
-    };
-    log.info("loading configuration from {s}", .{path_});
-
-    const raw = try std.fs.cwd().readFileAlloc(a, path_, 1 << 16);
-    defer a.free(raw);
-
-    return parseFromSlice(a, raw);
-}
-
-fn parseFromSlice(a: Allocator, raw: []const u8) !std.json.Parsed(Config) {
-    const parsed = try std.json.parseFromSlice(Config, a, raw, .{
-        .allocate = .alloc_always,
-        .ignore_unknown_fields = true,
-    });
-    errdefer parsed.deinit();
-
-    try Validator.validate(&parsed.value);
-    return parsed;
-}
-
-pub const Ipc = struct {
-    pid_file: []const u8,
-    sock_file: []const u8,
-};
-
-pub const Common = struct {
-    tun_name: []const u8,
-    tun_addr: []const u8,
-    tun_keep: bool,
-    bind: []const u8,
-    key: []const u8,
-
-    pub fn parseTunAddr(self: Common) ip.ParseError!u32 {
-        return ip.parse(self.tun_addr);
-    }
-
-    pub fn parseBind(self: Common) ip.WithPort.ParseError!std.net.Address {
-        return ip.WithPort.parseAddress(self.bind);
-    }
-
-    pub fn parseKey(self: Common) std.fmt.ParseIntError![32]u8 {
-        const parsed = try std.fmt.parseInt(u256, self.key, 16);
-        if (parsed == 0 and !builtin.is_test and builtin.mode != .Debug) {
-            log.err("cowardly refusing to use the all-zero key from example configurations", .{});
-            std.process.exit(1);
-        }
-
-        var buf: [32]u8 = undefined;
-        std.mem.writeInt(u256, &buf, parsed, .little);
-        return buf;
-    }
-};
-
 pub const Client = struct {
+    tun_keep: bool,
     server_addr: []const u8,
 
     pub fn parseServerAddr(self: Client) ip.WithPort.ParseError!std.net.Address {
@@ -90,6 +29,57 @@ pub const Server = struct {
     };
 };
 
+tun_name: []const u8,
+tun_addr: []const u8,
+bind: []const u8,
+key: []const u8,
+client: ?Client = null,
+server: ?Server = null,
+
+pub fn parseTunAddr(self: Config) ip.ParseError!u32 {
+    return ip.parse(self.tun_addr);
+}
+
+pub fn parseBind(self: Config) ip.WithPort.ParseError!std.net.Address {
+    return ip.WithPort.parseAddress(self.bind);
+}
+
+pub fn parseKey(self: Config) std.fmt.ParseIntError![32]u8 {
+    const parsed = try std.fmt.parseInt(u256, self.key, 16);
+    if (parsed == 0 and !builtin.is_test and builtin.mode != .Debug) {
+        log.err("cowardly refusing to use the all-zero key from example configurations", .{});
+        std.process.exit(1);
+    }
+
+    var buf: [32]u8 = undefined;
+    std.mem.writeInt(u256, &buf, parsed, .little);
+    return buf;
+}
+
+pub fn parse(a: Allocator, path: ?[]const u8) !std.json.Parsed(Config) {
+    const path_ = path orelse switch (builtin.os.tag) {
+        .linux => "/etc/otou.json",
+        else => unreachable,
+    };
+    log.debug("loading configuration from {s}", .{path_});
+
+    const raw = try std.fs.cwd().readFileAlloc(a, path_, 1 << 16);
+    defer a.free(raw);
+
+    return parseFromSlice(a, raw);
+}
+
+fn parseFromSlice(a: Allocator, raw: []const u8) !std.json.Parsed(Config) {
+    const parsed = try std.json.parseFromSlice(Config, a, raw, .{
+        .allocate = .alloc_always,
+        .ignore_unknown_fields = true,
+    });
+    errdefer parsed.deinit();
+
+    try Validator.validate(&parsed.value);
+    return parsed;
+}
+
 const Validator = struct {
     has_errors: bool = false,
 
@@ -99,23 +89,20 @@ const Validator = struct {
         if (c.client == null and c.server == null) v.fail("both client and server are null");
         if (c.client != null and c.server != null) v.fail("both client and server are not null");
 
-        if (c.ipc.pid_file.len == 0) v.fail("ipc.pid_file is empty");
-        if (c.ipc.sock_file.len == 0) v.fail("ipc.sock_file is empty");
+        if (c.tun_name.len == 0) v.fail("tun_name is empty");
+        if (c.tun_name.len > 15) v.fail("tun_name is longer than 15 bytes");
+        _ = c.parseBind() catch v.fail("bind is malformed");
+        _ = c.parseKey() catch v.fail("key is not 32 bytes in hex encoding");
 
-        if (c.common.tun_name.len == 0) v.fail("common.tun_name is empty");
-        if (c.common.tun_name.len > 8) v.fail("common.tun_name is longer than 8 bytes");
-        _ = c.common.parseBind() catch v.fail("common.bind is malformed");
-        _ = c.common.parseKey() catch v.fail("common.key is not 32 bytes in hex encoding");
-
-        const tun_addr: ?u32 = c.common.parseTunAddr() catch blk: {
-            v.fail("common.tun_addr is malformed");
+        const tun_addr: ?u32 = c.parseTunAddr() catch blk: {
+            v.fail("tun_addr is malformed");
             break :blk null;
         };
 
         if (tun_addr) |addr| {
             const host = addr & 0x000000ff;
-            if (host == 0) v.fail("common.tun_addr is a network address (last octet is 0)");
-            if (host == 255) v.fail("common.tun_addr is a broadcast address (last octet is 255)");
+            if (host == 0) v.fail("tun_addr is a network address (last octet is 0)");
+            if (host == 255) v.fail("tun_addr is a broadcast address (last octet is 255)");
         }
 
         if (c.client) |client| {
@@ -155,7 +142,7 @@ const Validator = struct {
             if (peer_host == 255) v.failWithArgs("server.peers[{}].ip is a broadcast address (last octet is 255)", .{i});
 
             if (peer_net != tun_net) {
-                v.failWithArgs("server.peers[{}].ip a common.tun_addr", .{i});
+                v.failWithArgs("server.peers[{}].ip a tun_addr", .{i});
             } else if (peer_hosts[peer_host]) {
                 v.failWithArgs("server.peers[{}].ip is a duplicate", .{i});
             } else {

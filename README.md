@@ -1,5 +1,30 @@
 # otou - Obfuscated Tunnel Over UDP
 
+TODO: write something here.
+
+## Configuration
+
+Default location is `/etc/otou.json`.
+See example configuration for [client](src/config_client_example.json) and [server](src/config_server_example.json).
+
+Constraints and clarifications:
+
+* `tun_name` -- 1 to 15 bytes.
+* `tun_addr` -- has an implicit `/24` mask. Must be unique among all peers (including the server);
+  if two peers use the same address their packets **will** get mixed.
+* `bind` -- servers should probably set the port explicitly.
+* `key` -- 32 bytes in hex format; can be generated with `otou genkey`.
+  Example key (all zeroes) is rejected in release builds.
+* `client` -- if not null otou will run in client mode. This field is mutually exclusive with `server`:
+  * `tun_keep` -- persist TUN interface and its routes after the main process shuts down.
+    May be used to prevent internet access in case the daemon dies suddenly.
+* `server` -- if not null otou will run in server mode. This field is mutually exclusive with `client`:
+  * `peers` -- all known TUN IPs with optional labels.
+    Packets sent from an unknown IP will be silently dropped. This is not a security feature;
+    the goal is to encourage assigning unique addresses to unique clients to prevent accidental address reuse.
+
+## Usage
+
 ```
 Usage: otou [OPTIONS] COMMAND
 
@@ -8,39 +33,54 @@ Options:
   -h, --help          print this message and exit
   -v, --version       print version and exit
 
-Commands:
+Common commands:
   genkey              generate a random 32-byte secret key
   run                 start main process
+
+Client mode commands:
+  routes [up|down]    set/reset gateway routes
 ```
 
-# Configuration
+### For server
 
-Default location is `/etc/otou.json`.
-See example configuration for [client](src/config_client_example.json) and [server](src/config_server_example.json).
+1. setup `otou run` daemon (for example as a `systemd` service);
+2. configure NAT routing for tunnel IP (like `iptables -t nat -s 10.13.37.1/24 -A POSTROUTING -j MASQUERADE`).
 
-Constraints and clarifications:
+### For client
 
-* `common.tun_name` -- 1 to 8 bytes.
-* `common.tun_addr` -- has an implicit `/24` mask. Must be unique among all peers (including the server);
-  if two peers use the same address their packets **will** get mixed.
-* `common.tun_keep` -- persist TUN interface and its routes after the main process shuts down.
-  May be useful to clients to prevent unprotected internet access in case the daemon dies suddenly.
-* `common.bind` -- servers should probably set the port explicitly.
-* `common.key` -- 32 bytes in hex format; can be generated with `otou genkey`.
-  Example key (all zeroes) is rejected in release builds.
-* `client` -- if not null `otou run` will use client mode. This field is mutually exclusive with `server`.
-* `server` -- if not null `otou run` will use server mode. This field is mutually exclusive with `client`:
-  * `peers` -- all known TUN IPs with optional labels.
-    Packets sent from an unknown IP will be silently dropped. This is not a security feature;
-    the goal is to encourage assigning unique addresses to unique clients to prevent accidental address reuse.
+1. setup `otou run` daemon (for example as a `systemd` service);
+2. run `otou routes up` to send all network packets through the tunnel;
+3. run `otou routes down` to restore normal network configuration.
+
+### Example systemd service file
+
+```
+[Unit]
+Description=Obfuscated Tunnel Over UDP
+After=network.target
+
+[Service]
+Type=exec
+Restart=always
+ExecStart=/path/to/otou run
+
+[Install]
+WantedBy=default.target
+```
+
+Put this in  `/etc/systemd/system/otou.service` and run:
+
+```
+systemctl daemon-reload
+systemctl start otou
+systemctl enable otou
+```
 
 # TODO
 
 Priority:
 
-* implement all the commands;
 * actually implement all the logic described in Configuration section;
-* automatic setup/tear-down of TUN interface and routes (client mode);
 
 Backlog:
 
@@ -49,5 +89,7 @@ Backlog:
 
 Maybe someday:
 
+* Docker images for server mode;
+* automatic NAT management for server mode (iptables are deprecated);
 * automatic DNS setup (if requested via config file);
 * IPv6 support;
