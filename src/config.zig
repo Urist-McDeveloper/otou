@@ -1,102 +1,10 @@
 const std = @import("std");
 const builtin = @import("builtin");
+
 const ip = @import("ip.zig");
 
 const log = std.log.scoped(.cfg);
-const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
-
-const version = "0.0.1";
-const usage =
-    \\Usage: otou [OPTIONS] COMMAND
-    \\
-    \\Options:
-    \\  -c, --config PATH   use PATH instead of default config file location
-    \\  -h, --help          print this message and exit
-    \\  -v, --version       print version and exit
-    \\
-    \\Commands:
-    \\  genkey              generate a random 32-byte secret key
-    \\  run                 start daemon
-    \\  down                shut down daemon and restore network configuration
-    \\  status              display status of daemon
-    \\  reload              apply configuration changes to the running daemon
-;
-
-pub const Command = enum {
-    genkey,
-    run,
-    down,
-    status,
-    reload,
-
-    fn from(str: []const u8) ?Command {
-        inline for (@typeInfo(Command).Enum.fields) |field| {
-            if (std.mem.eql(u8, field.name, str)) {
-                return @enumFromInt(field.value);
-            }
-        }
-        return null;
-    }
-};
-
-pub const Args = struct {
-    raw: []const [:0]u8,
-    config_path: ?[]const u8,
-    command: Command,
-
-    pub fn deinit(args: Args, a: Allocator) void {
-        std.process.argsFree(a, args.raw);
-    }
-
-    pub fn init(a: Allocator) !Args {
-        const raw = try std.process.argsAlloc(a);
-        errdefer std.process.argsFree(a, raw);
-
-        var config: ?[]const u8 = null;
-        var command: ?Command = null;
-
-        var i: usize = 1;
-        while (i < raw.len) : (i += 1) {
-            const arg = raw[i];
-
-            if (isOpt(arg, "help")) printAndExit(0, usage, .{});
-            if (isOpt(arg, "version")) printAndExit(0, version, .{});
-            if (isOpt(arg, "config")) {
-                i += 1;
-                if (i < raw.len) {
-                    config = raw[i];
-                    continue;
-                } else {
-                    printAndExit(1, "missing PATH parameter for {s}", .{arg});
-                }
-            }
-
-            if (command == null) {
-                command = Command.from(arg) orelse printAndExit(1, "unknown command: {s}", .{arg});
-                continue;
-            } else {
-                printAndExit(1, "command {s} does not accept any arguments", .{@tagName(command.?)});
-            }
-        }
-
-        return .{
-            .raw = raw,
-            .config_path = config,
-            .command = command orelse printAndExit(1, usage, .{}),
-        };
-    }
-
-    fn isOpt(arg: []const u8, comptime opt: []const u8) bool {
-        return std.mem.eql(u8, "--" ++ opt, arg) or std.mem.eql(u8, "-" ++ opt[0..1], arg);
-    }
-
-    inline fn printAndExit(code: u1, comptime fmt: []const u8, args: anytype) noreturn {
-        const file = if (code == 0) std.io.getStdOut() else std.io.getStdErr();
-        file.writer().print(fmt ++ "\n", args) catch {};
-        std.process.exit(code);
-    }
-};
 
 pub const Ipc = struct {
     pid_file: []const u8,
@@ -160,7 +68,7 @@ pub const Full = struct {
 
     pub fn parse(a: Allocator, path: ?[]const u8) !std.json.Parsed(Full) {
         const parsed = try parseFromFile(Full, a, path);
-        try ConfigValidator.validateFull(parsed.value);
+        try Validator.validateFull(parsed.value);
         return parsed;
     }
 };
@@ -170,7 +78,7 @@ pub const IpcOnly = struct {
 
     pub fn parse(a: Allocator, path: ?[]const u8) !std.json.Parsed(IpcOnly) {
         const parsed = try parseFromFile(IpcOnly, a, path);
-        try ConfigValidator.validateIpcOnly(parsed.value);
+        try Validator.validateIpcOnly(parsed.value);
         return parsed;
     }
 };
@@ -192,11 +100,11 @@ fn parseFromSlice(comptime T: type, a: Allocator, raw: []const u8) !std.json.Par
     return std.json.parseFromSlice(T, a, raw, .{ .allocate = .alloc_always, .ignore_unknown_fields = true });
 }
 
-const ConfigValidator = struct {
+const Validator = struct {
     has_errors: bool = false,
 
     pub fn validateIpcOnly(c: IpcOnly) !void {
-        var v = ConfigValidator{};
+        var v = Validator{};
 
         if (c.ipc.pid_file.len == 0) v.fail("ipc.pid_file is empty");
         if (c.ipc.sock_file.len == 0) v.fail("ipc.sock_file is empty");
@@ -205,7 +113,7 @@ const ConfigValidator = struct {
     }
 
     pub fn validateFull(c: Full) !void {
-        var v = ConfigValidator{};
+        var v = Validator{};
 
         if (c.client == null and c.server == null) v.fail("both client and server are null");
         if (c.client != null and c.server != null) v.fail("both client and server are not null");
@@ -239,7 +147,7 @@ const ConfigValidator = struct {
         return v.finish();
     }
 
-    fn validatePeers(v: *ConfigValidator, tun_addr: ?u32, peers: []const Server.Peer) void {
+    fn validatePeers(v: *Validator, tun_addr: ?u32, peers: []const Server.Peer) void {
         if (peers.len == 0) {
             v.fail("server.peers is empty");
             return;
@@ -274,7 +182,7 @@ const ConfigValidator = struct {
         }
     }
 
-    fn finish(self: ConfigValidator) !void {
+    fn finish(self: Validator) !void {
         if (self.has_errors) {
             if (builtin.is_test) {
                 return error.ValidationFailed;
@@ -284,11 +192,11 @@ const ConfigValidator = struct {
         }
     }
 
-    fn fail(self: *ConfigValidator, comptime fmt: []const u8) void {
+    fn fail(self: *Validator, comptime fmt: []const u8) void {
         self.failWithArgs(fmt, .{});
     }
 
-    fn failWithArgs(self: *ConfigValidator, comptime fmt: []const u8, args: anytype) void {
+    fn failWithArgs(self: *Validator, comptime fmt: []const u8, args: anytype) void {
         self.has_errors = true;
         log.err(fmt, args);
     }
@@ -300,23 +208,23 @@ const server_example_json = @embedFile("config_server_example.json");
 test "Full.parse client_example.json" {
     const parsed = try parseFromSlice(Full, std.testing.allocator, client_example_json);
     defer parsed.deinit();
-    try ConfigValidator.validateFull(parsed.value);
+    try Validator.validateFull(parsed.value);
 }
 
 test "Full.parse server_example.json" {
     const parsed = try parseFromSlice(Full, std.testing.allocator, server_example_json);
     defer parsed.deinit();
-    try ConfigValidator.validateFull(parsed.value);
+    try Validator.validateFull(parsed.value);
 }
 
 test "IpcOnly.parse client_example.json" {
     const parsed = try parseFromSlice(IpcOnly, std.testing.allocator, client_example_json);
     defer parsed.deinit();
-    try ConfigValidator.validateIpcOnly(parsed.value);
+    try Validator.validateIpcOnly(parsed.value);
 }
 
 test "IpcOnly.parse server_example.json" {
     const parsed = try parseFromSlice(IpcOnly, std.testing.allocator, server_example_json);
     defer parsed.deinit();
-    try ConfigValidator.validateIpcOnly(parsed.value);
+    try Validator.validateIpcOnly(parsed.value);
 }
