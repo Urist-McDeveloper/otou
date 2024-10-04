@@ -5,6 +5,36 @@ const ip = @import("ip.zig");
 
 const log = std.log.scoped(.cfg);
 const Allocator = std.mem.Allocator;
+const Config = @This();
+
+ipc: Ipc,
+common: Common,
+client: ?Client = null,
+server: ?Server = null,
+
+pub fn parse(a: Allocator, path: ?[]const u8) !std.json.Parsed(Config) {
+    const path_ = path orelse switch (builtin.os.tag) {
+        .linux => "/etc/otou.json",
+        else => unreachable,
+    };
+    log.info("loading configuration from {s}", .{path_});
+
+    const raw = try std.fs.cwd().readFileAlloc(a, path_, 1 << 16);
+    defer a.free(raw);
+
+    return parseFromSlice(a, raw);
+}
+
+fn parseFromSlice(a: Allocator, raw: []const u8) !std.json.Parsed(Config) {
+    const parsed = try std.json.parseFromSlice(Config, a, raw, .{
+        .allocate = .alloc_always,
+        .ignore_unknown_fields = true,
+    });
+    errdefer parsed.deinit();
+
+    try Validator.validate(&parsed.value);
+    return parsed;
+}
 
 pub const Ipc = struct {
     pid_file: []const u8,
@@ -60,59 +90,10 @@ pub const Server = struct {
     };
 };
 
-pub const Full = struct {
-    ipc: Ipc,
-    common: Common,
-    client: ?Client = null,
-    server: ?Server = null,
-
-    pub fn parse(a: Allocator, path: ?[]const u8) !std.json.Parsed(Full) {
-        const parsed = try parseFromFile(Full, a, path);
-        try Validator.validateFull(parsed.value);
-        return parsed;
-    }
-};
-
-pub const IpcOnly = struct {
-    ipc: Ipc,
-
-    pub fn parse(a: Allocator, path: ?[]const u8) !std.json.Parsed(IpcOnly) {
-        const parsed = try parseFromFile(IpcOnly, a, path);
-        try Validator.validateIpcOnly(parsed.value);
-        return parsed;
-    }
-};
-
-fn parseFromFile(comptime T: type, a: Allocator, path: ?[]const u8) !std.json.Parsed(T) {
-    const path_ = path orelse switch (builtin.os.tag) {
-        .linux => "/etc/otou.json",
-        else => unreachable,
-    };
-    log.info("loading configuration from {s}", .{path_});
-
-    const raw = try std.fs.cwd().readFileAlloc(a, path_, 1 << 16);
-    defer a.free(raw);
-
-    return parseFromSlice(T, a, raw);
-}
-
-fn parseFromSlice(comptime T: type, a: Allocator, raw: []const u8) !std.json.Parsed(T) {
-    return std.json.parseFromSlice(T, a, raw, .{ .allocate = .alloc_always, .ignore_unknown_fields = true });
-}
-
 const Validator = struct {
     has_errors: bool = false,
 
-    pub fn validateIpcOnly(c: IpcOnly) !void {
-        var v = Validator{};
-
-        if (c.ipc.pid_file.len == 0) v.fail("ipc.pid_file is empty");
-        if (c.ipc.sock_file.len == 0) v.fail("ipc.sock_file is empty");
-
-        return v.finish();
-    }
-
-    pub fn validateFull(c: Full) !void {
+    pub fn validate(c: *const Config) !void {
         var v = Validator{};
 
         if (c.client == null and c.server == null) v.fail("both client and server are null");
@@ -130,6 +111,7 @@ const Validator = struct {
             v.fail("common.tun_addr is malformed");
             break :blk null;
         };
+
         if (tun_addr) |addr| {
             const host = addr & 0x000000ff;
             if (host == 0) v.fail("common.tun_addr is a network address (last octet is 0)");
@@ -205,26 +187,10 @@ const Validator = struct {
 const client_example_json = @embedFile("config_client_example.json");
 const server_example_json = @embedFile("config_server_example.json");
 
-test "Full.parse client_example.json" {
-    const parsed = try parseFromSlice(Full, std.testing.allocator, client_example_json);
-    defer parsed.deinit();
-    try Validator.validateFull(parsed.value);
+test "parse client_example.json" {
+    (try parseFromSlice(std.testing.allocator, client_example_json)).deinit();
 }
 
-test "Full.parse server_example.json" {
-    const parsed = try parseFromSlice(Full, std.testing.allocator, server_example_json);
-    defer parsed.deinit();
-    try Validator.validateFull(parsed.value);
-}
-
-test "IpcOnly.parse client_example.json" {
-    const parsed = try parseFromSlice(IpcOnly, std.testing.allocator, client_example_json);
-    defer parsed.deinit();
-    try Validator.validateIpcOnly(parsed.value);
-}
-
-test "IpcOnly.parse server_example.json" {
-    const parsed = try parseFromSlice(IpcOnly, std.testing.allocator, server_example_json);
-    defer parsed.deinit();
-    try Validator.validateIpcOnly(parsed.value);
+test "parse server_example.json" {
+    (try parseFromSlice(std.testing.allocator, server_example_json)).deinit();
 }

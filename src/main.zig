@@ -3,9 +3,9 @@ const builtin = @import("builtin");
 
 const Args = @import("Args.zig");
 const Channel = @import("Channel.zig");
+const Config = @import("Config.zig");
 const Tun = @import("Tun.zig");
 
-const config = @import("config.zig");
 const net = std.net;
 const posix = std.posix;
 
@@ -27,7 +27,7 @@ pub fn main() !void {
             try std.io.getStdOut().writer().print("{x:0>64}\n", .{std.mem.readInt(u256, &key, .little)});
         },
         .run => {
-            const parsed = try config.Full.parse(a, args.config_path);
+            const parsed = try Config.parse(a, args.config_path);
             defer parsed.deinit();
             const common = parsed.value.common;
 
@@ -36,21 +36,7 @@ pub fn main() !void {
 
             try Worker.run(tun, parsed.value);
         },
-        else => {
-            const parsed = try config.IpcOnly.parse(a, args.config_path);
-            defer parsed.deinit();
-
-            try runIpc(a, args.command, parsed.value.ipc);
-        },
     }
-}
-
-pub fn runIpc(a: std.mem.Allocator, command: Args.Command, ipc: config.Ipc) !void {
-    _ = a;
-    _ = command;
-    _ = ipc;
-
-    return error.NotImplemented;
 }
 
 pub const Worker = struct {
@@ -63,7 +49,7 @@ pub const Worker = struct {
     peer_addr_fixed: ?net.Address,
     peer_addr_dyn: ?net.Address,
 
-    pub fn run(tun: Tun, cfg: config.Full) !void {
+    pub fn run(tun: Tun, cfg: Config) !void {
         var ctx = Worker{
             .ch = try Channel.init(try cfg.common.parseKey(), try cfg.common.parseBind()),
             .tun = tun,
@@ -125,7 +111,7 @@ test {
     _ = @import("Args.zig");
     _ = @import("Channel.zig");
     _ = @import("cmd.zig");
-    _ = @import("config.zig");
+    _ = @import("Config.zig");
     _ = @import("ip.zig");
     _ = @import("Tun.zig");
 }

@@ -10,10 +10,7 @@ Options:
 
 Commands:
   genkey              generate a random 32-byte secret key
-  run                 start daemon
-  down                shut down daemon and restore network configuration
-  status              display status of daemon
-  reload              apply configuration changes to the running daemon
+  run                 start main process
 ```
 
 # Configuration
@@ -26,8 +23,8 @@ Constraints and clarifications:
 * `common.tun_name` -- 1 to 8 bytes.
 * `common.tun_addr` -- has an implicit `/24` mask. Must be unique among all peers (including the server);
   if two peers use the same address their packets **will** get mixed.
-* `common.tun_keep` -- persist TUN interface and its routes after the daemon shuts down on its own,
-  i.e. without calling `otou down`. May be used to prevent internet access in case the daemon dies suddenly.
+* `common.tun_keep` -- persist TUN interface and its routes after the main process shuts down.
+  May be useful to clients to prevent unprotected internet access in case the daemon dies suddenly.
 * `common.bind` -- servers should probably set the port explicitly.
 * `common.key` -- 32 bytes in hex format; can be generated with `otou genkey`.
   Example key (all zeroes) is rejected in release builds.

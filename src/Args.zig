@@ -12,18 +12,12 @@ const usage =
     \\
     \\Commands:
     \\  genkey              generate a random 32-byte secret key
-    \\  run                 start daemon
-    \\  down                shut down daemon and restore network configuration
-    \\  status              display status of daemon
-    \\  reload              apply configuration changes to the running daemon
+    \\  run                 start main process
 ;
 
 pub const Command = enum {
     genkey,
     run,
-    down,
-    status,
-    reload,
 
     fn from(str: []const u8) ?Command {
         inline for (@typeInfo(Command).Enum.fields) |field| {
