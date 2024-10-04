@@ -88,7 +88,7 @@ fn parseFromFile(comptime T: type, a: Allocator, path: ?[]const u8) !std.json.Pa
         .linux => "/etc/otou.json",
         else => unreachable,
     };
-    log.info("loading configuration from \"{s}\"", .{path_});
+    log.info("loading configuration from {s}", .{path_});
 
     const raw = try std.fs.cwd().readFileAlloc(a, path_, 1 << 16);
     defer a.free(raw);

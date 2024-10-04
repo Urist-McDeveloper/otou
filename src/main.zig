@@ -31,7 +31,7 @@ pub fn main() !void {
             defer parsed.deinit();
             const common = parsed.value.common;
 
-            var tun = try Tun.open(common.tun_name, common.tun_keep);
+            var tun = try Tun.open(a, common.tun_name, common.tun_addr, common.tun_keep);
             defer tun.close();
 
             try Worker.run(tun, parsed.value);
@@ -124,6 +124,7 @@ pub const Worker = struct {
 test {
     _ = @import("Args.zig");
     _ = @import("Channel.zig");
+    _ = @import("cmd.zig");
     _ = @import("config.zig");
     _ = @import("ip.zig");
     _ = @import("Tun.zig");
