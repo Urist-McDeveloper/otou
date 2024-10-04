@@ -110,15 +110,15 @@ pub const Common = struct {
     bind: []const u8,
     key: []const u8,
 
-    pub fn parseTunAddr(self: Common) !ip.WithMask {
-        return ip.WithMask.parse(self.tun_addr);
+    pub fn parseTunAddr(self: Common) ip.ParseError!u32 {
+        return ip.parse(self.tun_addr);
     }
 
-    pub fn parseBind(self: Common) !std.net.Address {
+    pub fn parseBind(self: Common) ip.WithPort.ParseError!std.net.Address {
         return ip.WithPort.parseAddress(self.bind);
     }
 
-    pub fn parseKey(self: Common) ![32]u8 {
+    pub fn parseKey(self: Common) std.fmt.ParseIntError![32]u8 {
         const parsed = try std.fmt.parseInt(u256, self.key, 16);
         if (parsed == 0 and !builtin.is_test and builtin.mode != .Debug) {
             log.err("cowardly refusing to use the all-zero key from example configurations", .{});
@@ -134,7 +134,7 @@ pub const Common = struct {
 pub const Client = struct {
     server_addr: []const u8,
 
-    pub fn parseServerAddr(self: Client) !std.net.Address {
+    pub fn parseServerAddr(self: Client) ip.WithPort.ParseError!std.net.Address {
         return ip.WithPort.parseAddress(self.server_addr);
     }
 };
@@ -160,7 +160,7 @@ pub const Full = struct {
 
     pub fn parse(a: Allocator, path: ?[]const u8) !std.json.Parsed(Full) {
         const parsed = try parseFromFile(Full, a, path);
-        try ConfigValidator.validateFull(a, parsed.value);
+        try ConfigValidator.validateFull(parsed.value);
         return parsed;
     }
 };
@@ -204,7 +204,7 @@ const ConfigValidator = struct {
         return v.finish();
     }
 
-    pub fn validateFull(a: Allocator, c: Full) !void {
+    pub fn validateFull(c: Full) !void {
         var v = ConfigValidator{};
 
         if (c.client == null and c.server == null) v.fail("both client and server are null");
@@ -218,47 +218,58 @@ const ConfigValidator = struct {
         _ = c.common.parseBind() catch v.fail("common.bind is malformed");
         _ = c.common.parseKey() catch v.fail("common.key is not 32 bytes in hex encoding");
 
-        const tun_addr = c.common.parseTunAddr() catch blk: {
+        const tun_addr: ?u32 = c.common.parseTunAddr() catch blk: {
             v.fail("common.tun_addr is malformed");
-            break :blk ip.WithMask.ANY;
+            break :blk null;
         };
+        if (tun_addr) |addr| {
+            const host = addr & 0x000000ff;
+            if (host == 0) v.fail("common.tun_addr is a network address (last octet is 0)");
+            if (host == 255) v.fail("common.tun_addr is a broadcast address (last octet is 255)");
+        }
 
         if (c.client) |client| {
             _ = client.parseServerAddr() catch v.fail("client.server_addr is malformed");
         }
 
         if (c.server) |server| {
-            try v.validatePeers(a, tun_addr, server.peers);
+            v.validatePeers(tun_addr, server.peers);
         }
 
         return v.finish();
     }
 
-    fn validatePeers(v: *ConfigValidator, a: Allocator, tun_addr: ip.WithMask, peers: []const Server.Peer) !void {
+    fn validatePeers(v: *ConfigValidator, tun_addr: ?u32, peers: []const Server.Peer) void {
         if (peers.len == 0) {
             v.fail("server.peers is empty");
             return;
         }
 
-        var peer_ip = try a.alloc(u32, peers.len);
-        defer a.free(peer_ip);
-        @memset(peer_ip, 0);
+        const tun_addr_ = tun_addr orelse return;
+        const tun_net = tun_addr_ & 0xffffff00;
+        const tun_host = tun_addr_ & 0x000000ff;
+
+        var peer_hosts = [_]bool{false} ** 256;
+        peer_hosts[tun_host] = true;
 
         for (peers, 0..) |peer, i| {
-            peer_ip[i] = peer.parseIp() catch {
+            const peer_ip = peer.parseIp() catch {
                 v.failWithArgs("server.peers[{}].ip is malformed", .{i});
                 continue;
             };
 
-            for (0..i) |j| {
-                if (peer_ip[i] == peer_ip[j]) {
-                    v.failWithArgs("server.peers[{}].ip == server.peers[{}].ip", .{ i, j });
-                    break;
-                }
-            }
+            const peer_net = peer_ip & 0xffffff00;
+            const peer_host = peer_ip & 0x000000ff;
 
-            if (!tun_addr.sameSubnet(peer_ip[i])) {
-                v.failWithArgs("server.peers[{}].ip does not belong to the subnet of common.tun_addr", .{i});
+            if (peer_host == 0) v.failWithArgs("server.peers[{}].ip is a network address (last octet is 0)", .{i});
+            if (peer_host == 255) v.failWithArgs("server.peers[{}].ip is a broadcast address (last octet is 255)", .{i});
+
+            if (peer_net != tun_net) {
+                v.failWithArgs("server.peers[{}].ip a common.tun_addr", .{i});
+            } else if (peer_hosts[peer_host]) {
+                v.failWithArgs("server.peers[{}].ip is a duplicate", .{i});
+            } else {
+                peer_hosts[peer_host] = true;
             }
         }
     }
@@ -289,13 +300,13 @@ const server_example_json = @embedFile("config_server_example.json");
 test "Full.parse client_example.json" {
     const parsed = try parseFromSlice(Full, std.testing.allocator, client_example_json);
     defer parsed.deinit();
-    try ConfigValidator.validateFull(std.testing.allocator, parsed.value);
+    try ConfigValidator.validateFull(parsed.value);
 }
 
 test "Full.parse server_example.json" {
     const parsed = try parseFromSlice(Full, std.testing.allocator, server_example_json);
     defer parsed.deinit();
-    try ConfigValidator.validateFull(std.testing.allocator, parsed.value);
+    try ConfigValidator.validateFull(parsed.value);
 }
 
 test "IpcOnly.parse client_example.json" {

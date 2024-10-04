@@ -26,7 +26,7 @@ pub fn main() !void {
             const parsed = try config.Full.parse(a, args.config_path);
             defer parsed.deinit();
 
-            var tun = try Tun.open("tun-otou");
+            var tun = try Tun.open(parsed.value.common.tun_name);
             defer tun.close();
 
             try Worker.run(tun, parsed.value);

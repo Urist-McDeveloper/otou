@@ -24,8 +24,8 @@ See example configuration for [client](src/config_client_example.json) and [serv
 Constraints and clarifications:
 
 * `common.tun_name` -- 1 to 8 bytes.
-* `common.tun_addr` -- must be unique among all peers (including the server);
-  if two peers use the same address their packets **will** get mixed. Mask length is mandatory.
+* `common.tun_addr` -- has an implicit `/24` mask. Must be unique among all peers (including the server);
+  if two peers use the same address their packets **will** get mixed.
 * `common.tun_keep` -- persist TUN interface and its routes after the daemon shuts down on its own,
   i.e. without calling `otou down`. May be used to prevent internet access in case the daemon dies suddenly.
 * `common.bind` -- servers should probably set the port explicitly.
