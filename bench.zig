@@ -75,6 +75,13 @@ pub const aead = struct {
         T.decrypt(data, data, tag.*, ad, iv.*, key.*) catch unreachable;
     }
 
+    fn withBlake3(comptime T: type, comptime key_len: usize, comptime iv_len: usize, in: [64]u8, out: *[64]u8) void {
+        var buf: [64]u8 = undefined;
+        std.crypto.hash.Blake3.hash(in[32..56], &buf, .{ .key = in[0..32].* });
+
+        generic(T, key_len, iv_len, buf, out);
+    }
+
     fn aegis(in: [64]u8, out: *[64]u8) void {
         generic(Aegis, 16, 16, in, out);
     }
@@ -87,10 +94,25 @@ pub const aead = struct {
         generic(XChaCha, 32, 24, in, out);
     }
 
+    fn aegisWithBlake(in: [64]u8, out: *[64]u8) void {
+        withBlake3(Aegis, 16, 16, in, out);
+    }
+
+    fn chachaWithBlake(in: [64]u8, out: *[64]u8) void {
+        withBlake3(ChaCha, 32, 12, in, out);
+    }
+
+    fn xchachaWithBlake(in: [64]u8, out: *[64]u8) void {
+        withBlake3(XChaCha, 32, 24, in, out);
+    }
+
     pub const algorithms = [_]Algorithm{
         .{ .name = "aegis128L", .func = aegis },
         .{ .name = "chacha20poly1305", .func = chacha },
         .{ .name = "xchacha20poly1305", .func = xchacha },
+        .{ .name = "blake3+aegis128L", .func = aegisWithBlake },
+        .{ .name = "blake3+chacha20poly1305", .func = chachaWithBlake },
+        .{ .name = "blake3+xchacha20poly1305", .func = xchachaWithBlake },
     };
 };
 
@@ -101,7 +123,7 @@ fn bench(arena: *Arena, iter: usize, family: []const u8, comptime T: type) !void
     defer _ = arena.reset(.retain_capacity);
 
     inline for (T.algorithms) |alg| {
-        std.debug.print("{s:>20} = {:>6} op/ms\n", .{ alg.name, try alg.bench(a, iter) });
+        std.debug.print("{s:>30} = {:>6} op/ms\n", .{ alg.name, try alg.bench(a, iter) });
     }
 }
 
