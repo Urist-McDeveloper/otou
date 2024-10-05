@@ -1,18 +1,14 @@
 # otou - Obfuscated Tunnel Over UDP
 
-Simple IPv4 tunnel over UDP that makes its packets look like nothing in particular.
-Used encryption scheme makes every byte of UDP payload look uniformly random;
-packet length obfuscation is planned (see TODO section at the bottom).
+Simple IPv4 tunnel over UDP that makes its packets look like nothing in particular:
+* used encryption scheme makes every byte of UDP payload look uniformly random;
+* packet length is obfuscated by appending a small (1 to 8) random number of bytes.
 
 Uses entirely connectionless and mostly stateless communication protocol
-(server does keep track of client addresses to send packets back).
-As a consequence:
+(server does keep track of client addresses to send packets back). As a result, there is no:
 
-* No peer verification beyond knowing the shared secret; any client can impersonate other clients or even the server.
-* No built-in protection against replay attacks and other fancy security features.
-* Used cipher (`AEGIS128L`) must fully decrypt each packet before it can verify its authenticity;
-  sending garbage is a good and easy way to achieve 100% CPU utilization on any peer.
-  On the upside, forging packet authentication without knowing the shared secret is basically impossible.
+* peer verification beyond knowing the shared secret (any client can impersonate other clients or even the server);
+* built-in protection against replay attacks and other fancy security features.
 
 Linux only (for now).
 
@@ -91,7 +87,7 @@ See example configuration for [client](src/config_client_example.json) and [serv
 
 ## How to build
 
-1. Download Zig v0.13 (https://ziglang/download);
+1. Download Zig v0.13 (https://ziglang.org/download);
 2. clone this repo: `git clone https://github.com/Urist-McDeveloper/otou.git`;
 3. run `zig build --release=safe`.
 
@@ -106,7 +102,6 @@ Priority:
 Backlog:
 
 * add some options to control inter-client communication;
-* add random padding to packets to obfuscate length;
 
 Maybe someday:
 

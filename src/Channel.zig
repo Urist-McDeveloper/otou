@@ -5,28 +5,105 @@ const net = std.net;
 const posix = std.posix;
 
 const Self = @This();
-const Blake3 = std.crypto.hash.Blake3;
+const Rng = std.Random.ChaCha;
 const Aegis128L = std.crypto.aead.aegis.Aegis128L;
 
-pub const max_msg_size = 1460; // to fit in 1500 MTU with 40 bytes of IPv4 packet overhead
-pub const header_size = 40; // 24 byte nonce, 16 byte tag
-pub const max_data_len = max_msg_size - header_size;
-
-sock: posix.socket_t,
-recv_buf: [max_msg_size]u8 = undefined,
-send_buf: [max_msg_size]u8 = undefined,
-
-key: [32]u8,
-rng: std.Random.ChaCha,
-
+pub const AuthError = error{ Garbage, Forged };
 pub const InitError = posix.SocketError || posix.BindError || posix.GetRandomError;
-pub const RecvError = error{ Garbage, Forged } || posix.RecvFromError;
+pub const RecvError = AuthError || posix.RecvFromError;
 pub const SendError = posix.SendToError;
 
-pub const RecvData = struct {
-    from: net.Address,
-    data: []u8,
+pub const Envelope = extern struct {
+    pub const max_size = 1460; // to fit in 1500 MTU with 40 bytes of IPv4 packet overhead
+
+    const unencrypted_size = 16 + 20; // tag + nonce
+    const header_size = unencrypted_size + 4; // tag + nonce + metadata
+
+    const min_padding = 1;
+    const max_padding = 8;
+
+    pub const max_data_len = max_size - header_size - max_padding;
+
+    tag: [16]u8,
+    nonce: [20]u8,
+    metadata: [4]u8,
+    payload_buf: [max_data_len + max_padding]u8,
+    // not counted in max_size because this field is never on the wire
+    payload_len: u32,
+
+    pub fn getMaxDataSlice(self: *Envelope) []u8 {
+        return self.payload_buf[0..max_data_len];
+    }
+
+    pub fn getPayload(self: *Envelope) []u8 {
+        assert(self.payload_len <= max_data_len);
+        return self.payload_buf[0..self.payload_len];
+    }
+
+    pub fn getConstPayload(self: *const Envelope) []const u8 {
+        assert(self.payload_len <= max_data_len);
+        return self.payload_buf[0..self.payload_len];
+    }
+
+    pub fn setPayload(self: *Envelope, data: []const u8) void {
+        assert(data.len <= max_data_len);
+
+        self.payload_len = @intCast(data.len);
+        const payload = self.payload_buf[0..data.len];
+
+        if (payload.ptr != data.ptr) {
+            @memcpy(payload, data);
+        }
+    }
+
+    fn encrypt(self: *Envelope, key: [32]u8, rng: *Rng) []const u8 {
+        assert(self.payload_len <= max_data_len);
+
+        // nonce and metadata
+        rng.fill(&self.nonce);
+        rng.fill(&self.metadata);
+        // padding at the end of the payload
+        rng.fill(self.payload_buf[self.payload_len..][0..max_padding]);
+
+        const metadata = std.mem.readInt(u32, &self.metadata, .little);
+        const padding = 1 + metadata & 7;
+
+        const data = self.encryptedSlice(self.payload_len + padding);
+        const key16 = key[0..16].*;
+        const iv16 = key[16..32].*;
+        Aegis128L.encrypt(data, &self.tag, data, &self.nonce, iv16, key16);
+
+        return std.mem.asBytes(self)[0 .. unencrypted_size + data.len];
+    }
+
+    /// `size` is the total number of received bytes.
+    fn decrypt(self: *Envelope, key: [32]u8, size: usize) AuthError!void {
+        assert(size <= max_size);
+        if (size < header_size + min_padding) return AuthError.Garbage;
+
+        const data = self.encryptedSlice(size - header_size);
+        const key16 = key[0..16].*;
+        const iv16 = key[16..32].*;
+        Aegis128L.decrypt(data, data, self.tag, &self.nonce, iv16, key16) catch return AuthError.Forged;
+
+        const metadata = std.mem.readInt(u32, &self.metadata, .little);
+        const padding = 1 + metadata & 7;
+
+        if (size < header_size + padding) {
+            return error.Forged;
+        } else {
+            self.payload_len = @intCast(size - header_size - padding);
+        }
+    }
+
+    fn encryptedSlice(self: *Envelope, padded_data_len: usize) []u8 {
+        return std.mem.asBytes(self)[unencrypted_size .. header_size + padded_data_len];
+    }
 };
+
+sock: posix.socket_t,
+key: [32]u8,
+rng: Rng,
 
 pub fn init(key: [32]u8, bind: ?net.Address) InitError!Self {
     const sock = try posix.socket(posix.AF.INET, posix.SOCK.DGRAM, 0);
@@ -51,63 +128,30 @@ pub fn deinit(self: *Self) void {
     self.* = undefined;
 }
 
-pub fn recv(self: *Self) RecvError!RecvData {
+pub fn recv(self: *Self, envelope: *Envelope) RecvError!net.Address {
     var from_raw: posix.sockaddr align(4) = undefined;
     var from_len: posix.socklen_t = @intCast(@sizeOf(posix.sockaddr));
 
-    const msg_size = try posix.recvfrom(self.sock, &self.recv_buf, 0, &from_raw, &from_len);
-    const addr = net.Address.initPosix(&from_raw);
+    const size = try posix.recvfrom(self.sock, std.mem.asBytes(envelope), 0, &from_raw, &from_len);
+    try envelope.decrypt(self.key, size);
 
-    if (msg_size < header_size) return error.Garbage;
-
-    const msg_nonce = self.recv_buf[0..24];
-    const msg_tag = self.recv_buf[24..40];
-
-    var derived: [64]u8 = undefined;
-    Blake3.hash(msg_nonce, &derived, .{ .key = self.key });
-
-    const msg_key = derived[0..16];
-    const msg_iv = derived[16..32];
-    const msg_ad = derived[32..64];
-
-    const msg_data = self.recv_buf[header_size..msg_size];
-    Aegis128L.decrypt(msg_data, msg_data, msg_tag.*, msg_ad, msg_iv.*, msg_key.*) catch return error.Forged;
-
-    return RecvData{ .from = addr, .data = msg_data };
+    return net.Address.initPosix(&from_raw);
 }
 
-pub fn send(self: *Self, addr: net.Address, data_len: usize) SendError!void {
-    assert(data_len <= max_data_len);
-
-    const msg_nonce = self.send_buf[0..24];
-    const msg_tag = self.send_buf[24..40];
-    self.rng.fill(msg_nonce);
-
-    var derived: [64]u8 = undefined;
-    Blake3.hash(msg_nonce, &derived, .{ .key = self.key });
-
-    const msg_key = derived[0..16];
-    const msg_iv = derived[16..32];
-    const msg_ad = derived[32..64];
-
-    const msg_data = self.send_buf[header_size..][0..data_len];
-    Aegis128L.encrypt(msg_data, msg_tag, msg_data, msg_ad, msg_iv.*, msg_key.*);
-
-    const msg_size = header_size + data_len;
-    const sent = try posix.sendto(self.sock, self.send_buf[0..msg_size], 0, &addr.any, addr.getOsSockLen());
+pub fn send(self: *Self, addr: net.Address, envelope: *Envelope) SendError!void {
+    const data = envelope.encrypt(self.key, &self.rng);
+    const sent = try posix.sendto(self.sock, data, 0, &addr.any, addr.getOsSockLen());
 
     // sanity check, should never fail
-    assert(sent == msg_size);
-}
-
-/// Slice of bytes that will be sent in the next `self.send` call.
-pub fn getDataSlice(self: *Self) []u8 {
-    return self.send_buf[header_size..][0..max_data_len];
+    assert(sent == data.len);
 }
 
 test "sent packets are received" {
-    const key: [32]u8 = undefined;
+    var key: [32]u8 = undefined;
+    try posix.getrandom(&key);
+
     var ch = try init(key, try net.Address.parseIp4("127.0.0.1", 0));
+    var e: Envelope = undefined;
 
     var s_addr: posix.sockaddr align(4) = undefined;
     var s_len: posix.socklen_t = @sizeOf(posix.sockaddr);
@@ -117,9 +161,9 @@ test "sent packets are received" {
     var sent: [32]u8 = undefined;
     try posix.getrandom(&sent);
 
-    @memcpy(ch.getDataSlice()[0..32], &sent);
-    try ch.send(ch_addr, 32);
+    e.setPayload(&sent);
+    try ch.send(ch_addr, &e);
 
-    const recieved = try ch.recv();
-    try std.testing.expectEqualSlices(u8, &sent, recieved.data);
+    _ = try ch.recv(&e);
+    try std.testing.expectEqualSlices(u8, &sent, e.getPayload());
 }

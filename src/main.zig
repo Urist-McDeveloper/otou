@@ -79,25 +79,31 @@ pub const Worker = struct {
 
     fn hostToPeerLoop(ctx: *Worker) !void {
         const scoped = log.scoped(.host_to_peer);
+        var e: Channel.Envelope = undefined;
+
         while (true) {
-            const recv = try ctx.tun.recv(ctx.ch.getDataSlice());
+            const recv = try ctx.tun.recv(e.getMaxDataSlice());
+            e.setPayload(recv);
+
             const addr = ctx.peer_addr_fixed orelse ctx.peer_addr_dyn orelse {
                 scoped.warn("peer address unknown", .{});
                 continue;
             };
 
-            ctx.ch.send(addr, recv.len) catch |e| switch (e) {
+            ctx.ch.send(addr, &e) catch |err| switch (err) {
                 posix.SendError.NetworkUnreachable => scoped.err("network unreachable", .{}),
                 posix.SendToError.UnreachableAddress => scoped.err("unreachable address {}", .{addr}),
-                else => return e,
+                else => return err,
             };
         }
     }
 
     fn peerToHostLoop(ctx: *Worker) !void {
         const scoped = log.scoped(.peer_to_host);
+        var e: Channel.Envelope = undefined;
+
         while (true) {
-            const recv = ctx.ch.recv() catch |err| switch (err) {
+            const addr = ctx.ch.recv(&e) catch |err| switch (err) {
                 error.Garbage => {
                     scoped.debug("dropping malformed packet", .{});
                     continue;
@@ -108,8 +114,8 @@ pub const Worker = struct {
                 },
                 else => return err,
             };
-            ctx.peer_addr_dyn = recv.from;
-            try ctx.tun.send(recv.data);
+            ctx.peer_addr_dyn = addr;
+            try ctx.tun.send(e.getConstPayload());
         }
     }
 };

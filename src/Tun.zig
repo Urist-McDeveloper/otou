@@ -3,7 +3,7 @@ const builtin = @import("builtin");
 const cmd = @import("cmd.zig");
 
 const Tun = @This();
-const mtu = @import("Channel.zig").max_data_len;
+const mtu = @import("Channel.zig").Envelope.max_data_len;
 
 const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
@@ -19,7 +19,7 @@ pub fn close(tun: Tun) void {
     tun.impl.close();
 }
 
-pub fn send(tun: Tun, buf: []u8) !void {
+pub fn send(tun: Tun, buf: []const u8) !void {
     return tun.impl.send(buf);
 }
 
@@ -153,7 +153,7 @@ const LinuxImpl = struct {
         posix.close(self.fd);
     }
 
-    pub fn send(self: LinuxImpl, buf: []u8) posix.WriteError!void {
+    pub fn send(self: LinuxImpl, buf: []const u8) posix.WriteError!void {
         const size = try posix.write(self.fd, buf);
         // sanity check, should never fail
         assert(size == buf.len);

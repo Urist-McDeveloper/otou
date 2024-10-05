@@ -39,7 +39,7 @@ const linux = struct {
 
         if (result.len > 0) {
             const gateway = result[0 .. result.len - 1];
-            log.debug("setting up bypass route for {s} via {s}", .{server_ip, gateway});
+            log.debug("setting up bypass route for {s} via {s}", .{ server_ip, gateway });
             try cmd.execute(a, &.{ "ip", "route", "replace", server_ip, "via", gateway, "metric", "10" });
         } else {
             log.warn("default route does not exist, cannot set up bypass route for {s}", .{server_ip});
