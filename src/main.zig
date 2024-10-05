@@ -3,7 +3,9 @@ const builtin = @import("builtin");
 
 const Args = @import("Args.zig");
 const Channel = @import("Channel.zig");
+const Client = @import("Client.zig");
 const Config = @import("Config.zig");
+const Server = @import("Server.zig");
 const Tun = @import("Tun.zig");
 
 const ip = @import("ip.zig");
@@ -38,7 +40,11 @@ pub fn main() !void {
                 var tun = try Tun.open(a, cfg.tun_name, cfg.tun_addr, tun_keep);
                 defer tun.close();
 
-                try Worker.run(tun, cfg);
+                if (cfg.client != null) {
+                    try run(Client, tun, cfg);
+                } else {
+                    try run(Server, tun, cfg);
+                }
             },
             .routes_up => try routes.up(a, cfg),
             .routes_down => try routes.down(a, cfg),
@@ -47,107 +53,25 @@ pub fn main() !void {
     }
 }
 
-pub const Worker = struct {
-    const Thread = std.Thread;
-    const Mutex = Thread.Mutex;
+fn run(comptime T: type, tun: Tun, cfg: Config) !void {
+    var ctx = try T.init(tun, cfg);
+    defer ctx.deinit();
 
-    ch: Channel,
-    tun: Tun,
+    const htp_thread = try std.Thread.spawn(.{}, T.hostToPeer, .{&ctx});
+    const pth_thread = try std.Thread.spawn(.{}, T.peerToHost, .{&ctx});
 
-    peer_addr_fixed: ?net.Address,
-    peer_addr_dyn: ?net.Address,
-
-    pub fn run(tun: Tun, cfg: Config) !void {
-        var ctx = Worker{
-            .ch = try Channel.init(try cfg.parseKey(), try cfg.parseBind()),
-            .tun = tun,
-            .peer_addr_fixed = if (cfg.client) |c| try c.parseServerAddr() else null,
-            .peer_addr_dyn = null,
-        };
-        defer ctx.deinit();
-
-        const htp_thread = try Thread.spawn(.{}, Worker.hostToPeerLoop, .{&ctx});
-        const pth_thread = try Thread.spawn(.{}, Worker.peerToHostLoop, .{&ctx});
-
-        htp_thread.join();
-        pth_thread.join();
-    }
-
-    fn deinit(ctx: *Worker) void {
-        ctx.ch.deinit();
-        ctx.* = undefined;
-    }
-
-    fn hostToPeerLoop(ctx: *Worker) !void {
-        const scoped = log.scoped(.host_to_peer);
-        var e: Channel.Envelope = undefined;
-
-        while (true) {
-            const recv = try ctx.tun.recv(e.getMaxDataSlice());
-            e.setPayload(recv);
-
-            const info = ip.PacketInfo.parse(recv) catch |err| {
-                switch (err) {
-                    error.NotIp4 => scoped.debug("dropping IPv6 packet", .{}),
-                    error.MalformedPacket => scoped.warn("recv malformed IPv4 packet", .{}),
-                }
-                continue;
-            };
-            scoped.debug("recv {} (header_len = {})", .{info, recv.len - info.payload.len});
-
-            const addr = ctx.peer_addr_fixed orelse ctx.peer_addr_dyn orelse {
-                scoped.warn("peer address unknown", .{});
-                continue;
-            };
-
-            ctx.ch.send(addr, &e) catch |err| switch (err) {
-                posix.SendError.NetworkUnreachable => scoped.err("network unreachable", .{}),
-                posix.SendToError.UnreachableAddress => scoped.err("unreachable address {}", .{addr}),
-                else => return err,
-            };
-        }
-    }
-
-    fn peerToHostLoop(ctx: *Worker) !void {
-        const scoped = log.scoped(.peer_to_host);
-        var e: Channel.Envelope = undefined;
-
-        while (true) {
-            const addr = ctx.ch.recv(&e) catch |err| switch (err) {
-                error.Garbage => {
-                    scoped.debug("dropping malformed packet", .{});
-                    continue;
-                },
-                error.Forged => {
-                    scoped.debug("dropping forged packet", .{});
-                    continue;
-                },
-                else => return err,
-            };
-
-            ctx.peer_addr_dyn = addr;
-            const packet = e.getConstPayload();
-
-            const info = ip.PacketInfo.parse(packet) catch |err| {
-                switch (err) {
-                    error.NotIp4 => scoped.debug("dropping IPv6 packet", .{}),
-                    error.MalformedPacket => scoped.warn("recv malformed IPv4 packet", .{}),
-                }
-                continue;
-            };
-            scoped.debug("recv {} (header_len = {})", .{info, packet.len - info.payload.len});
-
-            try ctx.tun.send(packet);
-        }
-    }
-};
+    htp_thread.join();
+    pth_thread.join();
+}
 
 test {
     _ = @import("Args.zig");
     _ = @import("Channel.zig");
+    _ = @import("Client.zig");
     _ = @import("cmd.zig");
     _ = @import("Config.zig");
     _ = @import("ip.zig");
     _ = @import("routes.zig");
+    _ = @import("Server.zig");
     _ = @import("Tun.zig");
 }

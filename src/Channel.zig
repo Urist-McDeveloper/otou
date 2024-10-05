@@ -1,4 +1,5 @@
 const std = @import("std");
+const ip = @import("ip.zig");
 
 const assert = std.debug.assert;
 const net = std.net;
@@ -10,7 +11,7 @@ const Aegis128L = std.crypto.aead.aegis.Aegis128L;
 
 pub const AuthError = error{ Garbage, Forged };
 pub const InitError = posix.SocketError || posix.BindError || posix.GetRandomError;
-pub const RecvError = AuthError || posix.RecvFromError;
+pub const RecvError = AuthError || ip.VersionError || posix.RecvFromError;
 pub const SendError = posix.SendToError;
 
 pub const Envelope = extern struct {
@@ -136,8 +137,9 @@ pub fn recv(self: *Self, envelope: *Envelope) RecvError!net.Address {
     var from_len: posix.socklen_t = @intCast(@sizeOf(posix.sockaddr));
 
     const size = try posix.recvfrom(self.sock, std.mem.asBytes(envelope), 0, &from_raw, &from_len);
-    try envelope.decrypt(self.key, size);
+    if (from_raw.family != posix.AF.INET) return ip.VersionError.NotIp4;
 
+    try envelope.decrypt(self.key, size);
     return net.Address.initPosix(&from_raw);
 }
 

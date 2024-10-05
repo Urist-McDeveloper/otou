@@ -97,7 +97,7 @@ For cross-compiling, CPU selection and everything else look into the Zig build s
 
 Priority:
 
-* actually implement all the logic described in Configuration section;
+* test if linking libc can improve performance;
 
 Backlog:
 
