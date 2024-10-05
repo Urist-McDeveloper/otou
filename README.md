@@ -2,7 +2,7 @@
 
 Simple IPv4 tunnel over UDP that makes its packets look like nothing in particular:
 * used encryption scheme makes every byte of UDP payload look uniformly random;
-* packet length is obfuscated by appending a small (1 to 8) random number of bytes.
+* packet length is obfuscated by appending random number of bytes (1 to 8) .
 
 Uses entirely connectionless and mostly stateless communication protocol
 (server does keep track of client addresses to send packets back). As a result, there is no:

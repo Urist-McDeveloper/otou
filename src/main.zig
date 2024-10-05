@@ -6,6 +6,7 @@ const Channel = @import("Channel.zig");
 const Config = @import("Config.zig");
 const Tun = @import("Tun.zig");
 
+const ip = @import("ip.zig");
 const net = std.net;
 const posix = std.posix;
 const routes = @import("routes.zig");
@@ -85,6 +86,15 @@ pub const Worker = struct {
             const recv = try ctx.tun.recv(e.getMaxDataSlice());
             e.setPayload(recv);
 
+            const info = ip.PacketInfo.parse(recv) catch |err| {
+                switch (err) {
+                    error.NotIp4 => scoped.debug("dropping IPv6 packet", .{}),
+                    error.MalformedPacket => scoped.warn("recv malformed IPv4 packet", .{}),
+                }
+                continue;
+            };
+            scoped.debug("recv {} (header_len = {})", .{info, recv.len - info.payload.len});
+
             const addr = ctx.peer_addr_fixed orelse ctx.peer_addr_dyn orelse {
                 scoped.warn("peer address unknown", .{});
                 continue;
@@ -114,8 +124,20 @@ pub const Worker = struct {
                 },
                 else => return err,
             };
+
             ctx.peer_addr_dyn = addr;
-            try ctx.tun.send(e.getConstPayload());
+            const packet = e.getConstPayload();
+
+            const info = ip.PacketInfo.parse(packet) catch |err| {
+                switch (err) {
+                    error.NotIp4 => scoped.debug("dropping IPv6 packet", .{}),
+                    error.MalformedPacket => scoped.warn("recv malformed IPv4 packet", .{}),
+                }
+                continue;
+            };
+            scoped.debug("recv {} (header_len = {})", .{info, packet.len - info.payload.len});
+
+            try ctx.tun.send(packet);
         }
     }
 };

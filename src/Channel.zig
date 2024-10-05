@@ -14,7 +14,10 @@ pub const RecvError = AuthError || posix.RecvFromError;
 pub const SendError = posix.SendToError;
 
 pub const Envelope = extern struct {
-    pub const max_size = 1460; // to fit in 1500 MTU with 40 bytes of IPv4 packet overhead
+    const assumed_mtu = 1500;
+    const ip4_overhead = 20; // could be more but options field is very rarely used
+    const udp_overhead = 8;
+    pub const max_size = assumed_mtu - ip4_overhead - udp_overhead;
 
     const unencrypted_size = 16 + 20; // tag + nonce
     const header_size = unencrypted_size + 4; // tag + nonce + metadata

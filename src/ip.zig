@@ -5,7 +5,7 @@ const assert = std.debug.assert;
 const Address = std.net.Address;
 
 pub const ParseError = error{MalformedIp};
-pub const FromError = error{NotIp4};
+pub const VersionError = error{NotIp4};
 
 /// Returns IPv4 address in **native byte order**.
 pub fn parse(str: []const u8) ParseError!u32 {
@@ -23,13 +23,56 @@ pub fn parse(str: []const u8) ParseError!u32 {
 }
 
 /// Returns IPv4 address in **native byte order**.
-pub fn from(addr: Address) FromError!u32 {
+pub fn from(addr: Address) VersionError!u32 {
     if (addr.any.family == std.posix.AF.INET) {
         return std.mem.bigToNative(u32, addr.in.sa.addr);
     } else {
-        return FromError.NotIp4;
+        return VersionError.NotIp4;
     }
 }
+
+pub const PacketInfo = struct {
+    /// Source address in **native byte order**.
+    src: u32,
+    /// Destination address in **native byte order**.
+    dst: u32,
+    /// Payload
+    payload: []const u8,
+
+    pub const ParseError = VersionError || error{MalformedPacket};
+
+    pub fn parse(packet: []const u8) PacketInfo.ParseError!PacketInfo {
+        if (packet.len < 20) return error.MalformedPacket;
+        if (packet[0] & 0xf0 == 0x60) return error.NotIp4;
+        if (packet[0] & 0xf0 != 0x40) return error.MalformedPacket;
+
+        const header_len = 4 * (packet[0] & 0x0f);
+        if (header_len < 20 or header_len > packet.len) return error.MalformedPacket;
+
+        const total_len = std.mem.readInt(u16, packet[2..4], .big);
+        if (total_len != packet.len) return error.MalformedPacket;
+
+        return PacketInfo{
+            .src = std.mem.readInt(u32, packet[12..16], .big),
+            .dst = std.mem.readInt(u32, packet[16..20], .big),
+            .payload = packet[header_len..],
+        };
+    }
+
+    pub fn format(self: PacketInfo, comptime _: []const u8, _: std.fmt.FormatOptions, out: anytype) !void {
+        try std.fmt.format(out, "{}.{}.{}.{} -> {}.{}.{}.{} ({} bytes)", .{
+            0xff & (self.src >> 24),
+            0xff & (self.src >> 16),
+            0xff & (self.src >> 8),
+            0xff & (self.src),
+            0xff & (self.dst >> 24),
+            0xff & (self.dst >> 16),
+            0xff & (self.dst >> 8),
+            0xff & (self.dst),
+            self.payload.len,
+        });
+    }
+};
 
 /// IPv4 address and port in **native byte order**.
 pub const WithPort = struct {
@@ -53,7 +96,7 @@ pub const WithPort = struct {
         return (try WithPort.parse(str)).toAddress();
     }
 
-    pub fn from(addr: Address) FromError!WithPort {
+    pub fn from(addr: Address) VersionError!WithPort {
         if (addr.any.family == std.posix.AF.INET) {
             return WithPort{
                 .ip = std.mem.bigToNative(u32, addr.in.sa.addr),
